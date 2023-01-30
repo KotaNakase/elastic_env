@@ -24,8 +24,6 @@ sudo rpm --import https://artifacts.elastic.co/GPG-KEY-elasticsearch
 ```
 **ここで結局何をしているのか。このコマンドはyumではできない?** →鍵のインポートをしている。
 
-* discovery.type: single-nodeの追記...**デフォルトでmulti-node。複数ノードのクラスターを作成するか、単一ノードのクラスターを作成するか。**
-
 * systemd...コンピュータのシステムを起動するときに様々なプログラムを動かす、元のプログラムのこと。  
 →systemdに追加することで起動時にプログラムを動かしてくれる。
 
