@@ -11,10 +11,6 @@ sudo systemctl | grep elastic
 ```
 サービスの起動状態を確認したいだけならgrepによる絞り込みは不要。
 
-
-
-
-
 #### 不明点
 * yum updateを最初に行う理由が不明。何もインストールしていなければ必要ないのでは?→最初からインストールされているものがある。
 
@@ -27,6 +23,10 @@ sudo rpm --import https://artifacts.elastic.co/GPG-KEY-elasticsearch
 * systemd...コンピュータのシステムを起動するときに様々なプログラムを動かす、元のプログラムのこと。  
 →systemdに追加することで起動時にプログラムを動かしてくれる。
 
+* discovery.type=single-nodeの意味...クラスタの構成を決めるオプション。単一ノードか複数ノードか。
+  * クラスタ...複数サーバーで役割を分担して一つのサービスとしてふるまう構成。
+  * ノード...
+
 * **daemon-reload**...enableとセットで使用されているように見える。どのような命令か不明。
 
 * rpm...linuxのパッケージ管理コマンド。yumと似ている。**違いは?**
@@ -38,8 +38,8 @@ sudo rpm --import https://artifacts.elastic.co/GPG-KEY-elasticsearch
 
 YUMの手順
 1. 公開鍵を取得。
-2. URLを辿ってインストール。
-3. 公開鍵を使用してハッシュ値を比較。正しければ
+2. URLを辿ってインストーラー取得。
+3. 公開鍵を使用してハッシュ値を比較。正しければインストールされる。
 
 * rpmによる情報取得
   ```
@@ -132,5 +132,109 @@ sudo systemctl status filebeat
 sudo tail -f /var/log/filebeat/filebeat.log
 ```
 
-elasticsearch/kibana立ち上げ資料  
-https://github.com/ksaplabo-org/aircondition
+filebeat.yml(filebeatの設定ファイル)
+```
+logging.level: debug
+logging.to_files: true
+logging.files:
+  path: /var/log/filebeat
+  name: filebeat.log
+  keepfiles: 7
+  permissions: 0644
+```
+* logging.level...ログデータの取得範囲。DEBUG>INFO>WARNING>ERRORの順に広い範囲で取得する。
+* logging.to_files...ログデータを指定したディレクトリに出力するか。(追記するか)
+* logging.files...作成するログファイルのディレクトリや名前を指定。
+
+[elasticsearch/kibana立ち上げ資料](https://github.com/ksaplabo-org/aircondition)
+
+#### docker-composeによる環境構築
+1. elasticsearch,kibana,filebeatのイメージを使用してdocker-compose.ymlを作成
+
+  * depends_onの設定をkibana,filebeatに付与。(docker-compsoe内の起動順序)
+  * マウント先のパスを設定(./docker-compose_elastic/にそれぞれ作成するよう設計した)
+  * filebeatが起動しない
+
+調査事項
+* filebeatが起動しない原因(エラーコード、logが確認できない)
+  * エラーコード127...コンテナ内のコマンドが見つからない状態  
+docker inspect でコンテナの状態を確認  
+
+docker inspectでCmdとEntrypointの項目を確認(run実行時に走るファイルが記載されている)  
+runで立ち上げたコンテナに対して上記で確認したファイルが存在するか確認する。有れば走る。  
+今回は存在していたので、別の個所に理由がありそう。  
+
+* docker-compose.ymlで作成したイメージとbuildしたイメージの違いを検証。  
+→buildしても同様に起動しないことが確認できたので、docker-composeで設定した項目に問題があるかもしれない。
+
+* docker-compose.ymlの記述内容を一つずつ消していく。一つずつ試して、エラーになる原因の項目を探す。  
+→原因がvolumeにあることが判明。そもそも、filebeatにymlファイルを更新するためのvolumeマウントが必要ないことが判明。(更新はDockerfileで行う)
+
+* yml更新用のvolume項目を消してイメージを作成。無事に起動したので、次にfilebeatから投入したデータが拾えるかどうかの確認。
+
+* ログをsb-dataに投入しても音沙汰がない。ので、filebeat.yml(設定資料)の確認。  
+→そもそも拾ったログをどこに出力するかの設定を記載していなかったため、書く必要がある。
+```
+filebeat.inputs:
+- type: log 
+  paths:
+    - /var/log/search_log/*.log
+
+output.elasticsearch:
+  hosts: '${ELASTICSEARCH_HOSTS:elasticsearch:9200}'
+  username: '${ELASTICSEARCH_USERNAME:}'
+  password: '${ELASTICSEARCH_PASSWORD:}'
+
+logging.level: info
+logging.to_files: true
+logging.files:
+  path: /var/log/filebeat
+  name: filebeat.log
+  keepfiles: 7
+  permissions: 0644
+```
+上記のymlを書くことで **/var/log/search_log/*.log** にあるログデータが読み取られ、**/var/log/filebeat** 内に **filebeat.log**が作成される。
+
+* docker-compose.ymlを更新して再度イメージから立て直す。
+
+* まだ、ファイルは作成されなかった。理由はfilebeatコンテナにログインしているユーザーが「filebeat」に対して、ファイルの所有者が「root」のため、
+アクセス権が「drwxr-xr-x」であるフォルダ・ファイルに書き込むことができない。  
+→権限を変更(Dockerfileで以下を記載)
+```
+USER root
+RUN chmod -R 777 /var
+USER filebeat
+```
+アクセス権を変更するためにrootユーザーでログインし、/var以下を「rwxrwxrwx」に変更。再度ユーザーをfilebeatに戻して終了。
+
+* Dockerfileを変更したので、再度イメージから作成。
+
+* まだとりこめなかった。ログデータを確認すると、オフセットが0のままでログデータを読み込むことができていないことが判明。  
+aaa.log
+```
+aaaaa
+```
+オフセットが0のままなのでエラーを起こしていた。改行を最後にいれてあげることで、エラーは解消された。
+
+* tailコマンドとkibanaの画面でデータが取り込まれていることが確認でき、無事完成。
+
+#### 補足
+* 取り込まれるデータが多い!などあった場合や出力先のディレクトリを変えてほしいといった要望があった場合にはfilebeatのymlを更新し、再度イメージから作り直してあげるだけで、問題を解消できる。  
+→ただし、filebeatとコンテナの特性上、一度取得したデータかどうか判断するためのデータを永続化しないと、一度elasticsearchに取り込んだでーたを再度拾ってしまう点に注意。
+
+#### 試したこと(無駄足)
+→entrypointの上書き(entrypoint: /usr/local/bin/docker-entrypoint)→変数未定義エラー
+```
+/usr/local/bin/docker-entrypoint: line 7: $1: unbound variable
+```
+
+対象コンテナにtty: trueを追加する(疑似ターミナル (pseudo-TTY) を割り当て???)→変わらず。
+
+commitコマンドでコンテナからイメージを作成
+
+#### 不明点
+* elasticsearchのulimitsと環境変数(node)...未調査
+* elasticsearchのパスにデータが存在しない→パスの間違い/usr/share/elasticsearch/data
+* filebeatが立ち上がらないので、ymlを確認できない→イメージをカスタムする必要がある
+  * Dockerfileの作成が必要＞
+
